@@ -17,3 +17,9 @@
 .device-session-card{display:grid;gap:9px;margin-top:14px;padding:14px;border:1px solid #536b32;background:#20291a;border-radius:10px}
 .device-session-head{display:flex;align-items:center;gap:9px;color:#d8f77a;font-size:11px}
 .device-session-card p{margin:0;overflow-wrap:anywhere}
+
+/* Genymotion live device player */
+.device-player{height:min(62vh,560px);min-height:320px;width:100%;overflow:hidden;border:1px solid var(--line);border-radius:10px;background:#080a08;display:flex;align-items:center;justify-content:center;color:#d8f77a;font-size:11px}
+.device-player canvas,.device-player video{max-width:100%;max-height:100%;object-fit:contain}
+.device-session-card .device-player{margin:4px 0}
+@media(max-width:640px){.device-player{min-height:260px;height:48vh}}
