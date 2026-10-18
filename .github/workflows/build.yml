@@ -7,7 +7,7 @@ on:
 permissions:
   contents: read
 jobs:
-  build:
+  build-and-smoke-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,3 +17,17 @@ jobs:
           cache: npm
       - run: npm install
       - run: npm run build
+      - name: Smoke-test production API without starting billable devices
+        run: |
+          DEVICE_API_ACCESS_KEY=ci-smoke-test-key NODE_ENV=production PORT=8080 npm start &
+          APP_PID=$!
+          trap 'kill "$APP_PID" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            if curl --silent --fail http://127.0.0.1:8080/api/health >/dev/null; then break; fi
+            sleep 1
+          done
+          curl --fail http://127.0.0.1:8080/api/health
+          curl --fail http://127.0.0.1:8080/api/devices/providers
+          CODE=$(curl --silent --output /tmp/device.json --write-out '%{http_code}' -X POST http://127.0.0.1:8080/api/devices/sessions -H 'content-type: application/json' -H 'x-device-access-key: ci-smoke-test-key' -d '{"type":"cloud-phone","provider":"managed"}')
+          test "$CODE" = "503"
+          grep -q "GENYMOTION_API_TOKEN" /tmp/device.json
