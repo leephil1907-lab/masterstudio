@@ -16,3 +16,12 @@
 ## Integration contract
 
 A repository link is not a completed integration. Before an adapter is marked connected, record its license, supported version, required permissions, credential storage approach, error handling, tests, and rollback path. Keep secrets server-side. Require user confirmation for external publishing or destructive actions. Never automate login challenges or bypass platform access controls.
+
+
+## Device Studio (Cloud Phone + Android Emulator)
+
+Both device modules use one shared setup flow. The frontend must not report a session as active unless a configured provider returns a valid session ID.
+
+The provider adapter is not yet vendor-specific. Before enabling managed sessions, select a provider whose terms and API support the required Android runtime, installation, interaction, lifecycle, and usage controls. A browser app-testing sandbox is not necessarily a persistent general-purpose cloud phone.
+
+For a future self-hosted route, use an Android-in-cloud runtime with a separately secured WebRTC streaming/control layer. Do not expose ADB or emulator management ports publicly. Keep provider credentials on the server, require authorization, enforce quotas and session expiry, and log session lifecycle events.
