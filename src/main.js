@@ -83,66 +83,81 @@ function bind() {
 
 async function showDeviceSetup(initialType='cloud-phone') {
   const dialog=document.querySelector('#module-dialog');
+  if(state.deviceRenderer){try{state.deviceRenderer.VM_communication?.disconnect?.();state.deviceRenderer.destroy?.();}catch{}state.deviceRenderer=null;}
   document.querySelector('#dialog-content').innerHTML=`
-    <div class="eyebrow">DEVICE STUDIO / SHARED SETUP</div>
+    <div class="eyebrow">DEVICE STUDIO / GENYMOTION SAAS</div>
     <h2>Start an Android session</h2>
-    <p>One setup flow for Cloud Phone and Android Emulator. Sessions start only when a real provider is configured; this screen will never create a simulated device.</p>
+    <p>Choose a cloud-hosted Android device or emulator. Master Studio starts a real Genymotion instance; session availability and charges depend on your Genymotion plan.</p>
     <label class="field-label" for="device-type">Device workspace</label>
     <select id="device-type" class="dialog-input">
-      <option value="cloud-phone" ${initialType==='cloud-phone'?'selected':''}>Cloud Phone · managed Android device</option>
+      <option value="cloud-phone" ${initialType==='cloud-phone'?'selected':''}>Cloud Phone · portrait Android</option>
       <option value="android-emulator" ${initialType==='android-emulator'?'selected':''}>Android Emulator · virtual Android</option>
     </select>
     <label class="field-label" for="device-provider">Hosting route</label>
     <select id="device-provider" class="dialog-input">
-      <option value="managed">Managed provider (recommended first)</option>
-      <option value="self-hosted">Self-hosted bridge (future / your infrastructure)</option>
+      <option value="managed">Genymotion SaaS · managed cloud</option>
+      <option value="self-hosted" disabled>Self-hosted runtime · coming later</option>
     </select>
-    <label class="field-label" for="device-profile">Device profile</label>
-    <select id="device-profile" class="dialog-input">
-      <option value="pixel-8">Pixel-class · portrait</option>
-      <option value="pixel-tablet">Tablet · landscape-ready</option>
-      <option value="custom">Provider default</option>
-    </select>
-    <label class="field-label" for="device-app">App package or launch target (optional)</label>
-    <input id="device-app" class="dialog-input" placeholder="com.example.app" autocomplete="off" />
     <label class="field-label" for="device-key">Master Studio device access key</label>
-    <input id="device-key" class="dialog-input" type="password" placeholder="Provided by your deployment administrator" autocomplete="off" />
-    <p class="dialog-note">The access key is held in this page's memory only. Provider credentials stay on the server. Do not paste your provider API token here.</p>
-    <div class="device-provider-status" id="device-provider-status">Checking configured providers…</div>
-    <button class="primary-btn" id="start-device-session">Check setup & start session <span>→</span></button>
+    <input id="device-key" class="dialog-input" type="password" placeholder="Configured by your deployment administrator" autocomplete="off" />
+    <p class="dialog-note">The access key is held in this page's memory only. Your Genymotion API token stays on the server and must never be entered here.</p>
+    <div class="device-provider-status" id="device-provider-status">Checking provider configuration…</div>
+    <button class="primary-btn" id="start-device-session">Start cloud device <span>→</span></button>
     <div id="device-result" aria-live="polite"></div>`;
   dialog.showModal();
   const status=document.querySelector('#device-provider-status');
   try {
-    const r=await fetch('/api/devices/providers');
+    const r=await fetch('/api/devices/providers',{cache:'no-store'});
     if(!r.ok) throw new Error('API returned '+r.status);
     const data=await r.json();
-    status.innerHTML='<b>Managed provider:</b> '+(data.managed?.configured?'Configured':'Not configured')+'<br><b>Self-hosted bridge:</b> '+(data.selfHosted?.configured?'Configured':'Not configured');
+    const selected=document.querySelector('#device-type').value;
+    const ready=selected==='cloud-phone'?data.phone?.configured:data.emulator?.configured;
+    status.innerHTML='<b>Provider:</b> Genymotion SaaS<br><b>Cloud Phone recipe:</b> '+(data.phone?.configured?'Configured':'Missing configuration')+'<br><b>Emulator recipe:</b> '+(data.emulator?.configured?'Configured':'Missing configuration')+'<br><span>'+(ready?'Selected device is configured.':'Add the Genymotion API token and the selected recipe UUID to your server environment.')+'</span>';
   } catch {
-    status.innerHTML='<b>Device API unavailable.</b> The frontend is not connected to the Master Studio device backend yet. No session can be started until the server is deployed and configured.';
+    status.innerHTML='<b>Device API unavailable.</b> Deploy Master Studio using npm start so the session API is running.';
   }
+  document.querySelector('#device-type').addEventListener('change',async()=>{try{const r=await fetch('/api/devices/providers',{cache:'no-store'});const data=await r.json();const type=document.querySelector('#device-type').value;const ready=type==='cloud-phone'?data.phone?.configured:data.emulator?.configured;status.innerHTML='<b>Provider:</b> Genymotion SaaS<br><b>Cloud Phone recipe:</b> '+(data.phone?.configured?'Configured':'Missing configuration')+'<br><b>Emulator recipe:</b> '+(data.emulator?.configured?'Configured':'Missing configuration')+'<br><span>'+(ready?'Selected device is configured.':'Selected recipe or API token is missing.')+'</span>';}catch{}});
   document.querySelector('#start-device-session').addEventListener('click',async()=>{
     const out=document.querySelector('#device-result');
     const key=document.querySelector('#device-key').value.trim();
-    const provider=document.querySelector('#device-provider').value;
     const type=document.querySelector('#device-type').value;
-    const profile=document.querySelector('#device-profile').value;
-    const appTarget=document.querySelector('#device-app').value.trim();
+    const provider=document.querySelector('#device-provider').value;
     state.deviceAccessKey=key;
-    out.innerHTML='<p class="dialog-note">Requesting a real session from the configured '+(provider==='managed'?'managed provider':'self-hosted bridge')+'…</p>';
+    out.innerHTML='<p class="dialog-note">Requesting a real Android instance from Genymotion SaaS…</p>';
     try {
-      const r=await fetch('/api/devices/sessions',{method:'POST',headers:{'content-type':'application/json','x-device-access-key':key},body:JSON.stringify({type,provider,profile,appTarget})});
+      const r=await fetch('/api/devices/sessions',{method:'POST',headers:{'content-type':'application/json','x-device-access-key':key},body:JSON.stringify({type,provider})});
       const data=await r.json().catch(()=>({error:'Invalid response from device backend'}));
       if(!r.ok) throw new Error(data.error||('Device backend returned '+r.status));
-      if(!data.sessionId) throw new Error('Provider response did not include a session ID. No session was marked active.');
+      if(!data.sessionId||!data.webrtcUrl||!data.accessToken) throw new Error('Genymotion did not return a complete live-device connection. The session was not marked ready.');
       state.activeDeviceSession={...data,provider,type};
-      out.innerHTML='<div class="device-session-card"><div class="device-session-head"><span class="pulse"></span><b>Provider session created</b></div><p>Session: <code>'+escapeHTML(data.sessionId)+'</code></p><p>Status: '+escapeHTML(data.status||'created')+'</p>'+(data.launchUrl?'<a class="primary-btn" href="'+safeURL(data.launchUrl)+'" target="_blank" rel="noopener noreferrer">Open device session ↗</a>':'<p class="dialog-note">The provider did not return a launch URL. Use its documented session viewer.</p>')+'<button class="outline-btn" id="stop-device-session">End session</button></div>';
+      out.innerHTML='<div class="device-session-card"><div class="device-session-head"><span class="pulse"></span><b>Cloud instance created</b></div><p>Session: <code>'+escapeHTML(data.sessionId)+'</code></p><p>Provider state: '+escapeHTML(data.status||'CREATING')+'</p><div id="device-player" class="device-player"><span>Connecting to Android over WebRTC…</span></div><p id="device-player-status" class="dialog-note">Connecting the live device display…</p><a class="outline-btn" href="'+safeURL(data.instanceUrl||'https://cloud.geny.io')+'" target="_blank" rel="noopener noreferrer">Open in Genymotion Cloud ↗</a><button class="outline-btn" id="stop-device-session">End session</button></div>';
       document.querySelector('#stop-device-session')?.addEventListener('click',endDeviceSession);
+      try {
+        await loadGenymotionPlayer();
+        if(!state.activeDeviceSession||state.activeDeviceSession.sessionId!==data.sessionId) return;
+        const {DeviceRendererFactory}=window.genyDeviceWebPlayer;
+        state.deviceRenderer=new DeviceRendererFactory().setupRenderer(document.querySelector('#device-player'),data.webrtcUrl,{token:data.accessToken,fileUpload:false});
+        document.querySelector('#device-player-status').textContent='Live player initialized. Wait for the Android screen to finish connecting.';
+      } catch(playerError) {
+        document.querySelector('#device-player-status').textContent='Instance started, but the embedded player could not connect: '+(playerError.message||'unknown player error')+'. You can still open the instance in Genymotion Cloud.';
+      }
     } catch(err) {
-      out.innerHTML='<p class="validation-error">'+escapeHTML(err.message||'Unable to start session')+'</p><p class="dialog-note">No local demo session was created. Check provider configuration, API key, and server logs.</p>';
+      out.innerHTML='<p class="validation-error">'+escapeHTML(err.message||'Unable to start session')+'</p><p class="dialog-note">No simulated session was created. Verify server configuration, Genymotion plan/recipe availability, and API logs.</p>';
     }
   });
 }
+function loadGenymotionPlayer() {
+  if(window.genyDeviceWebPlayer?.DeviceRendererFactory) return Promise.resolve();
+  if(window.__masterStudioGenyPlayerPromise) return window.__masterStudioGenyPlayerPromise;
+  window.__masterStudioGenyPlayerPromise=new Promise((resolve,reject)=>{
+    if(!document.querySelector('#genymotion-player-css')) {
+      const link=document.createElement('link');link.id='genymotion-player-css';link.rel='stylesheet';link.href='https://cdn.jsdelivr.net/npm/@genymotion/device-web-player@4.3.1/dist/css/device-renderer.min.css';document.head.appendChild(link);
+    }
+    const script=document.createElement('script');script.src='https://cdn.jsdelivr.net/npm/@genymotion/device-web-player@4.3.1/dist/js/device-renderer.min.js';script.onload=()=>window.genyDeviceWebPlayer?.DeviceRendererFactory?resolve():reject(new Error('Genymotion player SDK loaded without its renderer API'));script.onerror=()=>reject(new Error('Unable to load Genymotion player SDK'));document.head.appendChild(script);
+  });
+  return window.__masterStudioGenyPlayerPromise;
+}
+
 function escapeHTML(value) {
   return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
@@ -156,11 +171,12 @@ async function endDeviceSession() {
   if(!confirm('End this device session?')) return;
   out.innerHTML='<p class="dialog-note">Ending provider session…</p>';
   try {
+    if(state.deviceRenderer){try{state.deviceRenderer.VM_communication?.disconnect?.();state.deviceRenderer.destroy?.();}catch{}state.deviceRenderer=null;}
     const r=await fetch('/api/devices/sessions/'+encodeURIComponent(s.sessionId),{method:'DELETE',headers:{'x-device-access-key':state.deviceAccessKey,'content-type':'application/json'},body:JSON.stringify({provider:s.provider})});
     const data=await r.json().catch(()=>({}));
     if(!r.ok) throw new Error(data.error||('Device backend returned '+r.status));
     state.activeDeviceSession=null;
-    out.innerHTML='<p class="validation-ok">Provider confirmed the session was ended.</p>';
+    out.innerHTML='<p class="validation-ok">Genymotion confirmed the instance is stopping. Session '+escapeHTML(data.sessionId||s.sessionId)+' was sent the stop command.</p>';
   } catch(err) {
     out.innerHTML='<p class="validation-error">'+escapeHTML(err.message||'Could not end session')+'</p>';
   }
