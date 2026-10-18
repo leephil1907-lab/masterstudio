@@ -1,142 +1,141 @@
-import express from 'express';
-import { createServer as createViteServer } from 'vite';
-import { timingSafeEqual } from 'node:crypto';
+import { createServer } from 'node:http';
+import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { timingSafeEqual } from 'node:crypto';
+import { createServer as createViteServer } from 'vite';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const app = express();
-app.disable('x-powered-by');
-app.use(express.json({ limit: '32kb' }));
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const isProduction = process.env.NODE_ENV === 'production';
+const port = Number(process.env.PORT || 8080);
+const API = 'https://api.geny.io/cloud';
+const sessions = new Map();
 
-const providers = {
-  managed: { url: process.env.MANAGED_DEVICE_API_URL, token: process.env.MANAGED_DEVICE_API_TOKEN },
-  'self-hosted': { url: process.env.SELF_HOSTED_DEVICE_API_URL, token: process.env.SELF_HOSTED_DEVICE_API_TOKEN }
-};
-
+function json(res, status, data) {
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+  res.end(JSON.stringify(data));
+}
 function sameSecret(a, b) {
   if (!a || !b) return false;
-  const aa = Buffer.from(a);
-  const bb = Buffer.from(b);
+  const aa = Buffer.from(a); const bb = Buffer.from(b);
   return aa.length === bb.length && timingSafeEqual(aa, bb);
 }
-function requireDeviceAccess(req, res, next) {
-  const expected = process.env.DEVICE_API_ACCESS_KEY;
-  if (!expected) return res.status(503).json({ error: 'Device API is locked until DEVICE_API_ACCESS_KEY is configured on the server.' });
-  if (!sameSecret(req.get('x-device-access-key') || '', expected)) {
-    return res.status(401).json({ error: 'Invalid device access key.' });
-  }
-  next();
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', chunk => { body += chunk; if (body.length > 32768) { reject(new Error('Request body too large')); req.destroy(); } });
+    req.on('end', () => { try { resolve(body ? JSON.parse(body) : {}); } catch { reject(new Error('Invalid JSON body')); } });
+    req.on('error', reject);
+  });
 }
-function providerFor(name) {
-  if (!Object.hasOwn(providers, name)) return null;
-  const p = providers[name];
-  if (!p.url || !p.token) return null;
-  try {
-    const u = new URL(p.url);
-    if (process.env.NODE_ENV === 'production' && u.protocol !== 'https:') return null;
-  } catch { return null; }
-  return p;
+function requireAccess(req) {
+  return sameSecret(req.headers['x-device-access-key'], process.env.DEVICE_API_ACCESS_KEY);
 }
-async function providerRequest(provider, pathname, options = {}) {
-  const p = providerFor(provider);
-  if (!p) {
-    const e = new Error(provider === 'self-hosted'
-      ? 'Self-hosted bridge is not configured. Set SELF_HOSTED_DEVICE_API_URL and SELF_HOSTED_DEVICE_API_TOKEN.'
-      : 'Managed device provider is not configured. Set MANAGED_DEVICE_API_URL and MANAGED_DEVICE_API_TOKEN.');
-    e.status = 503;
-    throw e;
+function providerConfigured(provider, type) {
+  if (provider === 'managed') {
+    return Boolean(process.env.GENYMOTION_API_TOKEN && (type === 'cloud-phone' ? process.env.GENYMOTION_PHONE_RECIPE_UUID : process.env.GENYMOTION_EMULATOR_RECIPE_UUID));
   }
-  const base = p.url.replace(/\/+$/, '');
+  return Boolean(process.env.SELF_HOSTED_DEVICE_API_URL && process.env.SELF_HOSTED_DEVICE_API_TOKEN);
+}
+async function genymotion(pathname, options = {}) {
+  const token = process.env.GENYMOTION_API_TOKEN;
+  if (!token) { const e = new Error('Genymotion is not configured. Add GENYMOTION_API_TOKEN in deployment environment.'); e.status = 503; throw e; }
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 20000);
+  const timer = setTimeout(() => controller.abort(), 30000);
   try {
-    const response = await fetch(base + pathname, {
-      ...options,
-      signal: controller.signal,
-      headers: {
-        authorization: 'Bearer ' + p.token,
-        'content-type': 'application/json',
-        ...(options.headers || {})
-      }
+    const response = await fetch(API + pathname, {
+      ...options, signal: controller.signal,
+      headers: { 'x-api-token': token, 'content-type': 'application/json', ...(options.headers || {}) }
     });
     const text = await response.text();
-    let data;
-    try { data = text ? JSON.parse(text) : {}; } catch { data = { error: 'Provider returned a non-JSON response.' }; }
+    let data = {};
+    try { data = text ? JSON.parse(text) : {}; } catch { data = { message: 'Genymotion returned an unexpected response.' }; }
     if (!response.ok) {
-      const e = new Error(data.error || data.message || 'Provider request failed with HTTP ' + response.status);
-      e.status = response.status >= 400 && response.status < 500 ? 502 : 503;
+      const e = new Error(data.message || data.detail || 'Genymotion API returned HTTP ' + response.status);
+      e.status = response.status === 401 || response.status === 403 ? 502 : (response.status === 404 ? 404 : 503);
       throw e;
     }
     return data;
-  } finally {
-    clearTimeout(timer);
-  }
+  } finally { clearTimeout(timer); }
 }
-
-app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'masterstudio-device-api' }));
-app.get('/api/devices/providers', (_req, res) => {
-  res.json({
-    managed: { configured: Boolean(providerFor('managed')), label: 'Managed provider' },
-    selfHosted: { configured: Boolean(providerFor('self-hosted')), label: 'Self-hosted bridge' }
+async function createGenymotionSession(type) {
+  const recipe = type === 'cloud-phone' ? process.env.GENYMOTION_PHONE_RECIPE_UUID : process.env.GENYMOTION_EMULATOR_RECIPE_UUID;
+  if (!recipe) { const e = new Error('Set ' + (type === 'cloud-phone' ? 'GENYMOTION_PHONE_RECIPE_UUID' : 'GENYMOTION_EMULATOR_RECIPE_UUID') + ' to a ready Genymotion recipe UUID.'); e.status = 503; throw e; }
+  const created = await genymotion('/v1/recipes/' + encodeURIComponent(recipe) + '/start-disposable', {
+    method: 'POST',
+    body: JSON.stringify({ instance_name: 'masterstudio-' + type + '-' + Date.now(), rename_on_conflict: true, timeouts: { global: 60, inactivity: 15 } })
   });
-});
-app.post('/api/devices/sessions', requireDeviceAccess, async (req, res) => {
-  const { type, provider, profile, appTarget } = req.body || {};
-  if (!['cloud-phone', 'android-emulator'].includes(type)) return res.status(400).json({ error: 'Unsupported device type.' });
-  if (!['managed', 'self-hosted'].includes(provider)) return res.status(400).json({ error: 'Unsupported provider route.' });
-  if (!['pixel-8', 'pixel-tablet', 'custom'].includes(profile)) return res.status(400).json({ error: 'Unsupported device profile.' });
-  if (typeof appTarget !== 'string' || appTarget.length > 180 || /[\r\n]/.test(appTarget)) return res.status(400).json({ error: 'Invalid app launch target.' });
+  if (!created.uuid) { const e = new Error('Genymotion did not return an instance UUID.'); e.status = 502; throw e; }
+  sessions.set(created.uuid, { provider: 'managed', type });
   try {
-    const data = await providerRequest(provider, '/api/sessions', {
-      method: 'POST',
-      body: JSON.stringify({ type, profile, appTarget: appTarget.trim() || null, requestedBy: 'masterstudio' })
-    });
-    if (!data.sessionId || typeof data.sessionId !== 'string') {
-      return res.status(502).json({ error: 'Provider response is missing sessionId. No active session was reported to Master Studio.' });
-    }
-    let launchUrl = null;
-    if (data.launchUrl) {
-      try {
-        const u = new URL(data.launchUrl);
-        if (u.protocol === 'https:') launchUrl = u.href;
-      } catch {}
-    }
-    return res.status(201).json({
-      sessionId: data.sessionId,
-      status: typeof data.status === 'string' ? data.status : 'created',
-      launchUrl,
-      deviceName: typeof data.deviceName === 'string' ? data.deviceName : undefined,
-      expiresAt: typeof data.expiresAt === 'string' ? data.expiresAt : undefined
-    });
-  } catch (e) {
-    return res.status(e.status || 503).json({ error: e.name === 'AbortError' ? 'Provider request timed out.' : (e.message || 'Unable to create provider session.') });
+    const tokenData = await genymotion('/v1/instances/access-token', { method: 'POST', body: JSON.stringify({ instance_uuid: created.uuid }) });
+    if (!tokenData.access_token || !created.webrtc_url) throw new Error('Instance started but the player connection details were not returned. Stop the instance and check the Genymotion API response.');
+    return {
+      sessionId: created.uuid, status: created.state || 'CREATING',
+      webrtcUrl: created.webrtc_url, accessToken: tokenData.access_token,
+      instanceUrl: 'https://cloud.geny.io/instance/' + encodeURIComponent(created.uuid)
+    };
+  } catch (error) {
+    try { await genymotion('/v1/instances/' + encodeURIComponent(created.uuid) + '/stop-disposable', { method: 'POST', body: '{}' }); } catch {}
+    sessions.delete(created.uuid);
+    throw error;
   }
-});
-app.delete('/api/devices/sessions/:sessionId', requireDeviceAccess, async (req, res) => {
-  const provider = req.body?.provider;
-  if (!['managed', 'self-hosted'].includes(provider)) return res.status(400).json({ error: 'Unsupported provider route.' });
-  const id = req.params.sessionId;
-  if (!id || id.length > 180 || !/^[A-Za-z0-9._:-]+$/.test(id)) return res.status(400).json({ error: 'Invalid session ID.' });
-  try {
-    const data = await providerRequest(provider, '/api/sessions/' + encodeURIComponent(id), { method: 'DELETE' });
-    return res.json({ ended: true, sessionId: id, status: data.status || 'ended' });
-  } catch (e) {
-    return res.status(e.status || 503).json({ error: e.name === 'AbortError' ? 'Provider request timed out.' : (e.message || 'Unable to end provider session.') });
+}
+async function stopGenymotionSession(id) {
+  const data = await genymotion('/v1/instances/' + encodeURIComponent(id) + '/stop-disposable', { method: 'POST', body: '{}' });
+  sessions.delete(id);
+  return { ended: true, sessionId: id, status: data.state || 'STOPPING' };
+}
+async function api(req, res, url) {
+  if (url.pathname === '/api/health' && req.method === 'GET') return json(res, 200, { ok: true, service: 'masterstudio-device-api' });
+  if (url.pathname === '/api/devices/providers' && req.method === 'GET') {
+    return json(res, 200, {
+      managed: { configured: providerConfigured('managed', 'cloud-phone') && providerConfigured('managed', 'android-emulator'), provider: 'Genymotion SaaS', docs: 'https://docs.genymotion.com/tools/saas/http_api/' },
+      phone: { configured: providerConfigured('managed', 'cloud-phone') },
+      emulator: { configured: providerConfigured('managed', 'android-emulator') },
+      selfHosted: { configured: providerConfigured('self-hosted') }
+    });
   }
-});
-
-if (process.env.NODE_ENV !== 'production') {
-  const vite = await createViteServer({ server: { middlewareMode: true }, appType: 'spa' });
-  app.use(vite.middlewares);
-} else {
-  const dist = path.resolve(__dirname, '../dist');
-  app.use(express.static(dist, { index: false, maxAge: '1h' }));
-  app.get('*', (_req, res) => res.sendFile(path.join(dist, 'index.html')));
+  if (url.pathname.startsWith('/api/devices/') && !requireAccess(req)) {
+    return json(res, process.env.DEVICE_API_ACCESS_KEY ? 401 : 503, { error: process.env.DEVICE_API_ACCESS_KEY ? 'Invalid device access key.' : 'Set DEVICE_API_ACCESS_KEY in the server environment before creating or stopping sessions.' });
+  }
+  if (url.pathname === '/api/devices/sessions' && req.method === 'POST') {
+    let body;
+    try { body = await readBody(req); } catch (e) { return json(res, 400, { error: e.message }); }
+    const { type, provider = 'managed' } = body;
+    if (!['cloud-phone', 'android-emulator'].includes(type)) return json(res, 400, { error: 'Unsupported device type.' });
+    if (provider !== 'managed') return json(res, 503, { error: 'Self-hosted runtime is a future adapter and is not enabled yet.' });
+    try { return json(res, 201, await createGenymotionSession(type)); }
+    catch (e) { return json(res, e.status || 503, { error: e.name === 'AbortError' ? 'Genymotion API request timed out.' : e.message }); }
+  }
+  const stopMatch = url.pathname.match(/^\/api\/devices\/sessions\/([0-9a-f-]{36})$/i);
+  if (stopMatch && req.method === 'DELETE') {
+    const id = stopMatch[1];
+    if (!sessions.has(id)) return json(res, 404, { error: 'Session is not tracked by this running Master Studio server. It may already be stopped or created by another server instance.' });
+    try { return json(res, 200, await stopGenymotionSession(id)); }
+    catch (e) { return json(res, e.status || 503, { error: e.name === 'AbortError' ? 'Genymotion API request timed out.' : e.message }); }
+  }
+  return json(res, 404, { error: 'API route not found.' });
 }
 
-const port = Number(process.env.PORT || 8080);
-app.listen(port, '0.0.0.0', () => {
-  console.log('Master Studio listening on port ' + port);
-  console.log('Device adapters are available only when provider URL/token and DEVICE_API_ACCESS_KEY are configured.');
+const vite = isProduction ? null : await createViteServer({ server: { middlewareMode: true }, appType: 'spa' });
+const server = createServer(async (req, res) => {
+  const url = new URL(req.url || '/', 'http://localhost');
+  if (url.pathname.startsWith('/api/')) return api(req, res, url);
+  if (!isProduction) return vite.middlewares(req, res, async () => { res.statusCode = 404; res.end('Not found'); });
+  let file = path.resolve(root, 'dist', '.' + decodeURIComponent(url.pathname));
+  if (!file.startsWith(path.resolve(root, 'dist'))) { res.writeHead(403); return res.end('Forbidden'); }
+  try {
+    let info = await stat(file);
+    if (info.isDirectory()) file = path.join(file, 'index.html');
+    const data = await readFile(file);
+    const ext = path.extname(file);
+    const types = { '.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.ico':'image/x-icon','.json':'application/json' };
+    res.writeHead(200, { 'content-type': types[ext] || 'application/octet-stream', 'x-content-type-options':'nosniff' });
+    return res.end(data);
+  } catch {
+    try { return res.writeHead(200, { 'content-type':'text/html; charset=utf-8' }).end(await readFile(path.join(root,'dist','index.html'))); }
+    catch { return json(res, 500, { error: 'Production build is missing. Run npm run build first.' }); }
+  }
 });
+server.listen(port, '0.0.0.0', () => console.log('Master Studio listening on port ' + port + (isProduction ? ' (production)' : ' (development)')));
