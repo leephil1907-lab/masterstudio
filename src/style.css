@@ -158,3 +158,29 @@ dialog p{font-size:12px}
  :root[data-theme="light"] .sidebar{background:#fbfcf7f2}
 }
 @media(max-width:390px){.nav-item{padding:8px 9px;gap:7px;font-size:9px}.nav-icon{font-size:12px}.brand{font-size:13px}.hero-row h1{font-size:36px}.content{padding-inline:12px}.module-card{padding:15px}}
+
+/* Brand mark + theme control alignment correction */
+.brand{display:flex;align-items:center;gap:12px;min-width:0;line-height:1.2}
+.brand>span:last-child{display:block;min-width:0;white-space:nowrap}
+.brand-mark{box-sizing:border-box;flex:0 0 42px;width:42px;height:42px;padding:9px;display:grid;place-items:center;line-height:0;border:1px solid #4b5b35;border-radius:12px;color:#d6f36d;background:linear-gradient(145deg,#222b1a,#11150f);overflow:hidden}
+.brand-mark svg{display:block;width:100%;height:100%;fill:currentColor}
+.brand-mark span{display:none}
+.brand .muted{margin-left:3px}
+.brand small{white-space:nowrap;font-size:8px;letter-spacing:.8px;line-height:1.4}
+.topbar{gap:16px}
+.breadcrumbs{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.top-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px;flex:0 0 auto}
+.theme-toggle{box-sizing:border-box;flex:0 0 38px;width:38px;height:38px;min-width:38px;display:inline-flex;align-items:center;justify-content:center;padding:0;line-height:1;border-radius:11px;font-size:19px;color:var(--text);background:var(--panel);border-color:var(--line);cursor:pointer}
+.theme-toggle span{display:block;line-height:1;transform:translateY(-.5px)}
+.theme-toggle:hover{border-color:#83965d;background:var(--panel2)}
+:root[data-theme="light"] .theme-toggle{color:#303625;background:#fff;border-color:#dfe2d5}
+@media(max-width:780px){
+ .brand{padding:0 4px 12px;gap:10px}
+ .brand-mark{flex-basis:34px;width:34px;height:34px;padding:7px;border-radius:10px}
+ .brand small{font-size:7px;letter-spacing:.45px}
+ .topbar{display:flex;align-items:center;justify-content:space-between;gap:8px}
+ .breadcrumbs{flex:1;min-width:0;font-size:10px}
+ .top-actions{gap:7px}
+ .theme-toggle{flex:0 0 34px;width:34px;min-width:34px;height:34px;border-radius:9px;font-size:17px}
+ .github-link{white-space:nowrap}
+}
